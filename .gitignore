@@ -1,0 +1,7 @@
+.idea
+*.iml
+out
+gen
+*node_modules
+/script/package-lock.json
+/config.json
