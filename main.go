@@ -262,19 +262,17 @@ func choseServ(servers map[string]*server.Server) (serv *server.Server) {
 				serv = s
 			}
 		}
-		return
-	}
-	if len(servers2) < len(onlineServers) {
+	} else if len(servers2) < len(onlineServers) {
 		for _, s := range onlineServers {
 			if (serv == nil || serv.PlayerCount() < s.PlayerCount()) && s.PlayerCount() < 12 {
 				serv = s
 			}
 		}
-		return
-	}
-	for _, s := range servers2 {
-		if serv == nil || serv.PlayerCount() > s.PlayerCount() {
-			serv = s
+	} else {
+		for _, s := range servers2 {
+			if serv == nil || serv.PlayerCount() > s.PlayerCount() {
+				serv = s
+			}
 		}
 	}
 	return
