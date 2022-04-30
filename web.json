@@ -1,6 +1,12 @@
 {
     "port": ":9000",
     "other_servers": [
-
+        "http://localhost:9001",
+        "http://localhost:9001/1",
+        "http://localhost:9001/2",
+        "http://localhost:9001/3"
+    ],
+    "load_balancer": [
+        "bedwars_eu"
     ]
 }

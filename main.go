@@ -4,24 +4,35 @@ import (
 	"flag"
 	"fmt"
 	"github.com/paroxity/portal/config"
+	"github.com/paroxity/portal/event"
 	"github.com/paroxity/portal/logger"
 	"github.com/paroxity/portal/query"
+	"github.com/paroxity/portal/server"
 	"github.com/paroxity/portal/session"
 	"github.com/paroxity/portal/socket"
 	"github.com/sandertv/gophertunnel/minecraft"
+	packet2 "github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/text"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/square/go-jose.v2/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 var otherPlayers int = 0
 var otherServers []string
 var webPort string
+var loadBalancer []string
+
+type sHandler struct {
+}
 
 func main() {
 
@@ -33,6 +44,7 @@ func main() {
 	var c = &struct {
 		OtherServers []string `json:"other_servers"`
 		Port         string   `json:"port"`
+		LoadBalancer []string `load_balancer`
 	}{}
 
 	if err = json.NewDecoder(f).Decode(c); err != nil {
@@ -41,6 +53,7 @@ func main() {
 
 	otherServers = c.OtherServers
 	webPort = c.Port
+	loadBalancer = c.LoadBalancer
 
 	var configPath string
 	flag.StringVar(&configPath, "config", "config.json", "Path to the config file.")
@@ -77,6 +90,23 @@ func main() {
 			panic(err)
 		}
 	}()
+
+	go func() {
+		LoadOtherProxy()
+		ticker := time.NewTicker(time.Second * 30)
+		quit := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case <-ticker.C:
+					LoadOtherProxy()
+				case <-quit:
+					ticker.Stop()
+					return
+				}
+			}
+		}()
+	}()
 	go listenWeb()
 	if config.ReportPlayerLatency() {
 		go socket.ReportPlayerLatency(config.PlayerLatencyUpdateInterval())
@@ -109,6 +139,7 @@ func handleConnection(l *minecraft.Listener, conn *minecraft.Conn) {
 	}
 
 	s, err := session.New(conn)
+	s.Handle(sHandler{})
 	if err != nil {
 		logrus.Errorf("Unable to create session, %v\n", err)
 		_ = l.Disconnect(conn, text.Colourf("<red>%v</red>", err))
@@ -146,4 +177,105 @@ func listenWeb() {
 		Handler: handler{},
 	}
 	log.Fatal(server.ListenAndServe())
+}
+
+func LoadOtherProxy() {
+	var i2 int64 = 0
+	var i *int64 = &i2
+	wg := &sync.WaitGroup{}
+	wg.Add(len(otherServers))
+	for _, server := range otherServers {
+		go recServ(i, server, wg)
+		continue
+	}
+	wg.Wait()
+	otherPlayers = int(*i)
+}
+func recServ(i *int64, server string, wg *sync.WaitGroup) {
+	c := http.Client{Timeout: time.Second * 3}
+	r, err := c.Get(server)
+	if err != nil {
+		logrus.Errorln("failed to get "+server+", error :", err)
+	}
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		logrus.Errorln("failed to read byte of "+server+", error :", err)
+	}
+	n, err := strconv.Atoi(string(b))
+	if err != nil {
+		logrus.Errorln("failed to read byte of "+server+", error :", err)
+	}
+	atomic.AddInt64(i, int64(n))
+	wg.Done()
+}
+
+func (sHandler) HandleClientBoundPacket(ctx *event.Context, pk packet2.Packet) {}
+
+// HandleServerBoundPacket ...
+func (sHandler) HandleServerBoundPacket(*event.Context, packet2.Packet) {}
+
+// HandleServerDisconnect ...
+func (sHandler) HandleServerDisconnect(*event.Context) {}
+
+// HandleTransfer ...
+func (sHandler) HandleTransfer(ctx *event.Context, s *server.Server) {
+	for _, lb := range loadBalancer {
+		if lb == s.Name() {
+			group, _ := server.GroupFromName(s.Group())
+			srv := choseServ(group.Servers())
+
+			if srv == nil {
+				ctx.Cancel()
+				return
+			}
+			s = srv
+		}
+	}
+}
+
+// HandleQuit ...
+func (sHandler) HandleQuit() {}
+
+func choseServ(servers map[string]*server.Server) (serv *server.Server) {
+	var onlineServers []*server.Server
+	for _, s := range servers {
+		if s.Connected() {
+			onlineServers = append(onlineServers, s)
+		}
+	}
+	if len(onlineServers) == 0 {
+		return
+	}
+	if len(onlineServers) == 1 {
+		return onlineServers[0]
+	}
+	// all servers with 12 online players or more
+	var servers2 []*server.Server
+	for _, s := range onlineServers {
+		if s.PlayerCount() >= 12 {
+			servers2 = append(servers2, s)
+		}
+	}
+	if len(servers2) == 0 {
+		for _, s := range onlineServers {
+			if serv == nil || serv.PlayerCount() < s.PlayerCount() {
+				serv = s
+			}
+		}
+		return
+	}
+	if len(servers2) < len(onlineServers) {
+		for _, s := range onlineServers {
+			if (serv == nil || serv.PlayerCount() < s.PlayerCount()) && s.PlayerCount() < 12 {
+				serv = s
+			}
+		}
+		return
+	}
+	for _, s := range servers2 {
+		if serv == nil || serv.PlayerCount() > s.PlayerCount() {
+			serv = s
+		}
+	}
+	return
 }
